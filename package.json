@@ -1,7 +1,7 @@
 {
 	"name": "@heyhuynhgiabuu/pi-diff",
 	"version": "0.3.0",
-	"description": "Shiki-powered terminal diff renderer for pi — syntax-highlighted, word-level diffs in split and unified views.",
+	"description": "Shiki-powered terminal diff renderer for pi — syntax-highlighted split and unified views with auto width detection.",
 	"author": "huynhgiabuu",
 	"license": "MIT",
 	"repository": {
@@ -21,14 +21,7 @@
 		"shiki",
 		"terminal"
 	],
-	"bin": {
-		"pi-diff-review": "./dist/cli.js"
-	},
 	"files": [
-		"dist/cli.d.ts",
-		"dist/cli.d.ts.map",
-		"dist/cli.js",
-		"dist/cli.js.map",
 		"dist/index.d.ts",
 		"dist/index.d.ts.map",
 		"dist/index.js",
@@ -37,48 +30,7 @@
 		"dist/core/diff.d.ts.map",
 		"dist/core/diff.js",
 		"dist/core/diff.js.map",
-		"dist/review/command.d.ts",
-		"dist/review/command.d.ts.map",
-		"dist/review/command.js",
-		"dist/review/command.js.map",
-		"dist/review/export.d.ts",
-		"dist/review/export.d.ts.map",
-		"dist/review/export.js",
-		"dist/review/export.js.map",
-		"dist/review/file-preview.d.ts",
-		"dist/review/file-preview.d.ts.map",
-		"dist/review/file-preview.js",
-		"dist/review/file-preview.js.map",
-		"dist/review/git.d.ts",
-		"dist/review/git.d.ts.map",
-		"dist/review/git.js",
-		"dist/review/git.js.map",
-		"dist/review/hunk-preview.d.ts",
-		"dist/review/hunk-preview.d.ts.map",
-		"dist/review/hunk-preview.js",
-		"dist/review/hunk-preview.js.map",
-		"dist/review/interactive.d.ts",
-		"dist/review/interactive.d.ts.map",
-		"dist/review/interactive.js",
-		"dist/review/interactive.js.map",
-		"dist/review/model.d.ts",
-		"dist/review/model.d.ts.map",
-		"dist/review/model.js",
-		"dist/review/model.js.map",
-		"dist/review/prompt.d.ts",
-		"dist/review/prompt.d.ts.map",
-		"dist/review/prompt.js",
-		"dist/review/prompt.js.map",
-		"dist/review/session.d.ts",
-		"dist/review/session.d.ts.map",
-		"dist/review/session.js",
-		"dist/review/session.js.map",
-		"dist/review/tui.d.ts",
-		"dist/review/tui.d.ts.map",
-		"dist/review/tui.js",
-		"dist/review/tui.js.map",
 		"media/",
-		"prompts/",
 		"README.md",
 		"LICENSE"
 	],
@@ -108,9 +60,6 @@
 	"pi": {
 		"extensions": [
 			"./dist/index.js"
-		],
-		"prompts": [
-			"./prompts"
 		]
 	}
 }
