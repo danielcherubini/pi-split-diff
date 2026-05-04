@@ -98,7 +98,7 @@
 		"vitest": "^4.0.18"
 	},
 	"scripts": {
-		"build": "tsc && chmod +x dist/cli.js",
+		"build": "tsc",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome check src/",
 		"lint:fix": "biome check --fix src/",

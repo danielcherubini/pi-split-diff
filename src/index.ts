@@ -29,162 +29,20 @@ import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
 import { type DiffLine, type ParsedDiff, parseDiff } from "./core/diff.js";
-import { registerReviewDiffCommand } from "./review/command.js";
-import { formatReviewMarkdown } from "./review/export.js";
-import { countReviewDiffLines, type ReviewDiffMode, readGitDiff } from "./review/git.js";
-import {
-	applyDiffPalette as applySharedDiffPalette,
-	lang as detectDiffLanguage,
-	renderSplit as renderSharedSplit,
-	resolveDiffColors as resolveSharedDiffColors,
-	themeCacheKey as sharedThemeCacheKey,
-} from "./review/hunk-preview.js";
-import {
-	createReviewComment,
-	formatInteractiveReviewPanel,
-	formatReviewComments,
-	type ReviewComment,
-} from "./review/interactive.js";
 
 // ---------------------------------------------------------------------------
-// Diff Theme System — presets, auto-derive, and per-color overrides
+// Diff Color System — auto-derive from theme, hardcoded fallback
 //
-// Resolution chain (per color, highest priority first):
-//   1. Environment variable override (e.g. DIFF_BG_ADD="#1a3320")
-//   2. diffColors.bgAdd from .pi/settings.json (explicit per-color hex)
-//   3. diffTheme preset value (named preset like "midnight")
-//   4. Auto-derived from pi theme fg colors (default behavior)
-//   5. Hardcoded fallback
+// Resolution chain:
+//   1. Auto-derived from pi theme fg colors (default behavior, lazy on first render)
+//   2. Hardcoded fallback
 // ---------------------------------------------------------------------------
-
-/** Hex color palette for a diff theme preset. All values "#RRGGBB". */
-interface DiffPreset {
-	name: string;
-	description: string;
-	shikiTheme?: string;
-	bgAdd?: string;
-	bgDel?: string;
-	bgAddHighlight?: string;
-	bgDelHighlight?: string;
-	bgGutterAdd?: string;
-	bgGutterDel?: string;
-	bgEmpty?: string;
-	fgAdd?: string;
-	fgDel?: string;
-	fgDim?: string;
-	fgLnum?: string;
-	fgRule?: string;
-	fgStripe?: string;
-	fgSafeMuted?: string;
-}
-
-/** User diff config read from .pi/settings.json */
-interface DiffUserConfig {
-	diffTheme?: string;
-	diffColors?: Record<string, string>;
-}
-
-const DIFF_PRESETS: Record<string, DiffPreset> = {
-	default: {
-		name: "default",
-		description: "Original pi-diff colors — tuned for dark theme bases (~#1e1e2e)",
-		bgAdd: "#162620",
-		bgDel: "#2d1919",
-		bgAddHighlight: "#234b32",
-		bgDelHighlight: "#502323",
-		bgGutterAdd: "#12201a",
-		bgGutterDel: "#261616",
-		bgEmpty: "#121212",
-		fgDim: "#505050",
-		fgLnum: "#646464",
-		fgRule: "#323232",
-		fgStripe: "#282828",
-		fgSafeMuted: "#8b949e",
-	},
-	midnight: {
-		name: "midnight",
-		description: "Subtle tints for pure black (#000000) terminal backgrounds",
-		bgAdd: "#0d1a12",
-		bgDel: "#1a0d0d",
-		bgAddHighlight: "#1a3825",
-		bgDelHighlight: "#381a1a",
-		bgGutterAdd: "#091208",
-		bgGutterDel: "#120908",
-		bgEmpty: "#080808",
-		fgDim: "#404040",
-		fgLnum: "#505050",
-		fgRule: "#282828",
-		fgStripe: "#1e1e1e",
-		fgSafeMuted: "#8b949e",
-	},
-	subtle: {
-		name: "subtle",
-		description: "Minimal backgrounds — barely-there tints for a clean look",
-		bgAdd: "#081008",
-		bgDel: "#100808",
-		bgAddHighlight: "#122818",
-		bgDelHighlight: "#281212",
-		bgGutterAdd: "#060c06",
-		bgGutterDel: "#0c0606",
-		bgEmpty: "#060606",
-		fgDim: "#383838",
-		fgLnum: "#484848",
-		fgRule: "#242424",
-		fgStripe: "#181818",
-		fgSafeMuted: "#8b949e",
-	},
-	neon: {
-		name: "neon",
-		description: "Higher contrast backgrounds for better visibility",
-		bgAdd: "#1a3320",
-		bgDel: "#331a16",
-		bgAddHighlight: "#2d5c3a",
-		bgDelHighlight: "#5c2d2d",
-		bgGutterAdd: "#142818",
-		bgGutterDel: "#28120e",
-		bgEmpty: "#141414",
-		fgDim: "#606060",
-		fgLnum: "#787878",
-		fgRule: "#404040",
-		fgStripe: "#303030",
-		fgSafeMuted: "#9da5ae",
-	},
-};
 
 /** Parse 24-bit ANSI color code → RGB. Works for both fg and bg escapes. */
 function parseAnsiRgb(ansi: string): { r: number; g: number; b: number } | null {
 	const esc = "\u001b";
 	const m = ansi.match(new RegExp(`${esc}\\[(?:38|48);2;(\\d+);(\\d+);(\\d+)m`));
 	return m ? { r: +m[1], g: +m[2], b: +m[3] } : null;
-}
-
-/** Convert "#RRGGBB" hex → ANSI 24-bit background escape. */
-function hexToBgAnsi(hex: string): string {
-	if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return "";
-	const r = Number.parseInt(hex.slice(1, 3), 16);
-	const g = Number.parseInt(hex.slice(3, 5), 16);
-	const b = Number.parseInt(hex.slice(5, 7), 16);
-	return `\x1b[48;2;${r};${g};${b}m`;
-}
-
-/** Convert "#RRGGBB" hex → ANSI 24-bit foreground escape. */
-function hexToFgAnsi(hex: string): string {
-	if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return "";
-	const r = Number.parseInt(hex.slice(1, 3), 16);
-	const g = Number.parseInt(hex.slice(3, 5), 16);
-	const b = Number.parseInt(hex.slice(5, 7), 16);
-	return `\x1b[38;2;${r};${g};${b}m`;
-}
-
-/** Derive a muted background ANSI code from a foreground ANSI code.
- *  Scales the fg RGB by `intensity` (0.0–1.0) to produce a subtle tint. */
-function deriveBgFromFg(fgAnsi: string, intensity: number): string {
-	const rgb = parseAnsiRgb(fgAnsi);
-	if (!rgb) return "";
-	const r = Math.round(rgb.r * intensity);
-	const g = Math.round(rgb.g * intensity);
-	const b = Math.round(rgb.b * intensity);
-	return `\x1b[48;2;${r};${g};${b}m`;
 }
 
 /** Mix an accent color into a base color at the given intensity (0.0–1.0).
@@ -200,12 +58,6 @@ function mixBg(
 	const b = Math.round(base.b + (accent.b - base.b) * intensity);
 	return `\x1b[48;2;${r};${g};${b}m`;
 }
-
-/** Whether auto-derive from theme is still pending (runs lazily on first render). */
-let _autoDerivePending = true;
-
-/** Whether user set explicit bg config (via preset or per-color overrides). */
-let _hasExplicitBgConfig = false;
 
 /** Auto-derive all diff background colors from the pi theme's fg diff colors.
  *  Reads toolSuccessBg as the add/context base and toolErrorBg as the delete base,
@@ -269,141 +121,15 @@ function autoDeriveBgFromTheme(theme: any): void {
 	}
 }
 
-/** Load diff theme config from .pi/settings.json (project-level, then global). */
-function loadDiffConfig(): DiffUserConfig {
-	const paths = [`${process.cwd()}/.pi/settings.json`, `${process.env.HOME ?? ""}/.pi/settings.json`];
-	for (const p of paths) {
-		try {
-			if (existsSync(p)) {
-				const raw = JSON.parse(readFileSync(p, "utf-8"));
-				if (raw.diffTheme || raw.diffColors) {
-					return { diffTheme: raw.diffTheme, diffColors: raw.diffColors };
-				}
-			}
-		} catch {
-			// skip invalid files
-		}
-	}
-	return {};
-}
-
-/** Apply diff palette from settings → preset → (auto-derive deferred) → defaults.
- *  Called once during extension initialization. */
-function applyDiffPalette(): void {
-	const config = loadDiffConfig();
-
-	// Load preset if specified
-	const preset = config.diffTheme ? DIFF_PRESETS[config.diffTheme] : null;
-	if (preset) _hasExplicitBgConfig = true;
-
-	// Per-color overrides from settings
-	const ov = config.diffColors ?? {};
-	if (Object.keys(ov).length > 0) _hasExplicitBgConfig = true;
-
-	// Helper: apply a hex bg color if not env-overridden
-	const applyBg = (envName: string | null, key: string, presetVal: string | undefined, set: (v: string) => void) => {
-		if (envName && process.env[envName]) return; // env override wins
-		const hex = ov[key] ?? presetVal;
-		if (hex) {
-			const a = hexToBgAnsi(hex);
-			if (a) set(a);
-		}
-	};
-	// Helper: apply a hex fg color if not env-overridden
-	const applyFg = (envName: string | null, key: string, presetVal: string | undefined, set: (v: string) => void) => {
-		if (envName && process.env[envName]) return;
-		const hex = ov[key] ?? presetVal;
-		if (hex) {
-			const a = hexToFgAnsi(hex);
-			if (a) set(a);
-		}
-	};
-
-	// --- Apply backgrounds ---
-	applyBg("DIFF_BG_ADD", "bgAdd", preset?.bgAdd, (v) => {
-		BG_ADD = v;
-	});
-	applyBg("DIFF_BG_DEL", "bgDel", preset?.bgDel, (v) => {
-		BG_DEL = v;
-	});
-	applyBg("DIFF_BG_ADD_HL", "bgAddHighlight", preset?.bgAddHighlight, (v) => {
-		BG_ADD_W = v;
-	});
-	applyBg("DIFF_BG_DEL_HL", "bgDelHighlight", preset?.bgDelHighlight, (v) => {
-		BG_DEL_W = v;
-	});
-	applyBg("DIFF_BG_GUTTER_ADD", "bgGutterAdd", preset?.bgGutterAdd, (v) => {
-		BG_GUTTER_ADD = v;
-	});
-	applyBg("DIFF_BG_GUTTER_DEL", "bgGutterDel", preset?.bgGutterDel, (v) => {
-		BG_GUTTER_DEL = v;
-	});
-	applyBg(null, "bgEmpty", preset?.bgEmpty, (v) => {
-		BG_EMPTY = v;
-	});
-
-	// --- Apply foregrounds ---
-	applyFg("DIFF_FG_ADD", "fgAdd", preset?.fgAdd, (v) => {
-		FG_ADD = v;
-	});
-	applyFg("DIFF_FG_DEL", "fgDel", preset?.fgDel, (v) => {
-		FG_DEL = v;
-	});
-	applyFg(null, "fgDim", preset?.fgDim, (v) => {
-		FG_DIM = v;
-	});
-	applyFg(null, "fgLnum", preset?.fgLnum, (v) => {
-		FG_LNUM = v;
-	});
-	applyFg(null, "fgRule", preset?.fgRule, (v) => {
-		FG_RULE = v;
-	});
-	applyFg(null, "fgStripe", preset?.fgStripe, (v) => {
-		FG_STRIPE = v;
-	});
-	applyFg(null, "fgSafeMuted", preset?.fgSafeMuted, (v) => {
-		FG_SAFE_MUTED = v;
-	});
-
-	// --- Shiki syntax theme ---
-	const shiki = ov.shikiTheme ?? preset?.shikiTheme;
-	if (shiki) THEME = shiki as BundledTheme;
-
-	// --- Rebuild derived constants ---
-	DIVIDER = `${FG_RULE}│${RST}`;
-	DEFAULT_DIFF_COLORS = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
-
-	// If no explicit bg config, auto-derive will run on first render
-	_autoDerivePending = !_hasExplicitBgConfig;
-}
-
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
-let THEME: BundledTheme = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
+const THEME: BundledTheme = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
 
 function envInt(name: string, fallback: number): number {
 	const v = Number.parseInt(process.env[name] ?? "", 10);
 	return Number.isFinite(v) && v > 0 ? v : fallback;
-}
-
-/** Parse env hex color "#RRGGBB" → ANSI 24-bit fg/bg escape, or return fallback. */
-function envFg(name: string, fallback: string): string {
-	const hex = process.env[name];
-	if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return fallback;
-	const r = Number.parseInt(hex.slice(1, 3), 16);
-	const g = Number.parseInt(hex.slice(3, 5), 16);
-	const b = Number.parseInt(hex.slice(5, 7), 16);
-	return `\x1b[38;2;${r};${g};${b}m`;
-}
-function envBg(name: string, fallback: string): string {
-	const hex = process.env[name];
-	if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return fallback;
-	const r = Number.parseInt(hex.slice(1, 3), 16);
-	const g = Number.parseInt(hex.slice(3, 5), 16);
-	const b = Number.parseInt(hex.slice(5, 7), 16);
-	return `\x1b[48;2;${r};${g};${b}m`;
 }
 
 // --- Split-view thresholds ---
@@ -443,25 +169,24 @@ const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 
 // Subtle diff backgrounds — muted tones to let syntax fg shine through
-// Override via env: DIFF_BG_ADD="#1a3320" etc. (hex "#RRGGBB" format)
-let BG_ADD = envBg("DIFF_BG_ADD", "\x1b[48;2;22;38;32m"); // muted teal-green
-let BG_DEL = envBg("DIFF_BG_DEL", "\x1b[48;2;45;25;25m"); // muted brown-red
-let BG_ADD_W = envBg("DIFF_BG_ADD_HL", "\x1b[48;2;35;75;50m"); // word-level emphasis
-let BG_DEL_W = envBg("DIFF_BG_DEL_HL", "\x1b[48;2;80;35;35m");
-let BG_GUTTER_ADD = envBg("DIFF_BG_GUTTER_ADD", "\x1b[48;2;18;32;26m");
-let BG_GUTTER_DEL = envBg("DIFF_BG_GUTTER_DEL", "\x1b[48;2;38;22;22m");
+let BG_ADD = "\x1b[48;2;22;38;32m"; // muted teal-green
+let BG_DEL = "\x1b[48;2;45;25;25m"; // muted brown-red
+let BG_ADD_W = "\x1b[48;2;35;75;50m"; // word-level emphasis
+let BG_DEL_W = "\x1b[48;2;80;35;35m";
+let BG_GUTTER_ADD = "\x1b[48;2;18;32;26m";
+let BG_GUTTER_DEL = "\x1b[48;2;38;22;22m";
 const BG_GUTTER_CTX = ""; // use terminal default bg for context gutters
 let BG_EMPTY = "\x1b[48;2;18;18;18m"; // filler rows when one side is shorter
 
-// Diff foregrounds — override via env: DIFF_FG_ADD="#50d264" etc.
-let FG_ADD = envFg("DIFF_FG_ADD", "\x1b[38;2;100;180;120m"); // desaturated green
-let FG_DEL = envFg("DIFF_FG_DEL", "\x1b[38;2;200;100;100m"); // desaturated red
-let FG_DIM = "\x1b[38;2;80;80;80m";
-let FG_LNUM = "\x1b[38;2;100;100;100m";
-let FG_RULE = "\x1b[38;2;50;50;50m";
-let FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
+// Diff foregrounds
+const FG_ADD = "\x1b[38;2;100;180;120m"; // desaturated green
+const FG_DEL = "\x1b[38;2;200;100;100m"; // desaturated red
+const FG_DIM = "\x1b[38;2;80;80;80m";
+const FG_LNUM = "\x1b[38;2;100;100;100m";
+const FG_RULE = "\x1b[38;2;50;50;50m";
+const FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
 
-let FG_STRIPE = "\x1b[38;2;40;40;40m"; // gray diagonal stripes on terminal default bg
+const FG_STRIPE = "\x1b[38;2;40;40;40m"; // gray diagonal stripes on terminal default bg
 
 const BORDER_BAR = "▌";
 
@@ -490,8 +215,7 @@ interface DiffColors {
 	fgCtx: string;
 }
 
-let DEFAULT_DIFF_COLORS: DiffColors = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
-let _lastResolvedThemeKey = "";
+const DEFAULT_DIFF_COLORS: DiffColors = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
 
 function themeCacheKey(theme?: any): string {
 	if (!theme?.fg) return "no-theme";
@@ -524,43 +248,19 @@ function themeCacheKey(theme?: any): string {
 	return parts.join("|");
 }
 
-/** Resolve diff fg colors from theme (if available), falling back to hardcoded ANSI.
- *  On first call with a valid theme, auto-derives bg colors if no explicit config was set.
- *  Always reads toolSuccessBg for BG_BASE (used for context/add line backgrounds). */
+let _didAutoDerive = false;
 function resolveDiffColors(theme?: any): DiffColors {
-	const currentThemeKey = themeCacheKey(theme);
-	if (!_hasExplicitBgConfig && _lastResolvedThemeKey && _lastResolvedThemeKey !== currentThemeKey) {
-		BG_BASE = BG_DEFAULT;
-		RST = "\x1b[0m";
-		_autoDerivePending = true;
-	}
-	_lastResolvedThemeKey = currentThemeKey;
-	// Always read toolSuccessBg for BG_BASE (even with explicit config)
-	if (theme?.getBgAnsi && BG_BASE === BG_DEFAULT) {
-		try {
-			const bgAnsi = theme.getBgAnsi("toolSuccessBg");
-			const parsed = parseAnsiRgb(bgAnsi);
-			if (parsed) {
-				BG_BASE = bgAnsi;
-				RST = `\x1b[0m${BG_BASE}`;
-			}
-		} catch {
-			/* ignore */
-		}
-	}
-
-	// Auto-derive bg colors from theme on first render (if no explicit preset/overrides)
-	if (_autoDerivePending && theme?.getFgAnsi) {
+	if (!_didAutoDerive && theme?.getFgAnsi) {
 		autoDeriveBgFromTheme(theme);
-		_autoDerivePending = false;
+		_didAutoDerive = true;
 	}
-
 	if (!theme?.getFgAnsi) return DEFAULT_DIFF_COLORS;
 	try {
-		const fgAdd = theme.getFgAnsi("toolDiffAdded") || FG_ADD;
-		const fgDel = theme.getFgAnsi("toolDiffRemoved") || FG_DEL;
-		const fgCtx = theme.getFgAnsi("toolDiffContext") || FG_DIM;
-		return { fgAdd, fgDel, fgCtx };
+		return {
+			fgAdd: theme.getFgAnsi("toolDiffAdded") || FG_ADD,
+			fgDel: theme.getFgAnsi("toolDiffRemoved") || FG_DEL,
+			fgCtx: theme.getFgAnsi("toolDiffContext") || FG_DIM,
+		};
 	} catch {
 		return DEFAULT_DIFF_COLORS;
 	}
@@ -1303,54 +1003,7 @@ export const __testing = {
 	renderUnified,
 };
 
-interface ReviewGitDiffParams {
-	base?: string;
-	raw?: boolean;
-	includeRawDiff?: boolean;
-	interactive?: boolean;
-	file?: string;
-	hunkId?: string;
-	maxFiles?: number;
-	maxHunks?: number;
-	maxLinesPerHunk?: number;
-}
-
-interface ReviewGitCommentParams {
-	file?: string;
-	line?: number;
-	hunkId?: string;
-	body?: string;
-}
-
-interface ReviewGitCommentsParams {
-	clear?: boolean;
-}
-
-function reviewGitDiffMode(params: ReviewGitDiffParams): ReviewDiffMode {
-	const base = typeof params.base === "string" ? params.base.trim() : "";
-	return base ? { type: "branch", base } : { type: "working-tree" };
-}
-
-function reviewGitDiffMaxLines(params: ReviewGitDiffParams): number | undefined {
-	if (params.maxLinesPerHunk === undefined) return undefined;
-	const maxLines = Number(params.maxLinesPerHunk);
-	if (!Number.isInteger(maxLines) || maxLines < 1) {
-		throw new Error("maxLinesPerHunk must be a positive integer");
-	}
-	return maxLines;
-}
-
-function normalizeOptionalPositiveInteger(value: unknown, name: string): number | undefined {
-	if (value === undefined || value === null) return undefined;
-	const number = Number(value);
-	if (!Number.isInteger(number) || number < 1) throw new Error(`${name} must be a positive integer`);
-	return number;
-}
-
 export default async function diffRendererExtension(pi: any): Promise<void> {
-	// Apply diff theme palette from settings/presets before rendering
-	applySharedDiffPalette();
-
 	let createWriteTool: any, createEditTool: any, getMarkdownTheme: any, TextComponent: any, MarkdownComponent: any;
 	try {
 		const sdk = await import("@mariozechner/pi-coding-agent");
@@ -1371,254 +1024,6 @@ export default async function diffRendererExtension(pi: any): Promise<void> {
 	const cwd = process.cwd();
 	const home = process.env.HOME ?? "";
 	const sp = (p: string) => shortPath(cwd, home, p);
-	const reviewComments: ReviewComment[] = [];
-
-	registerReviewDiffCommand(pi, cwd);
-
-	pi.registerTool({
-		name: "review_git_diff",
-		label: "Review Git Diff",
-		description: `Open a read-only Git diff review panel as markdown inside Pi TUI.
-
-Use this when the agent needs structured Git review context or a non-destructive markdown view of local changes. For the real keyboard-driven local review UI, use the /review-diff command instead. This tool never stages, commits, reverts, discards, or modifies files.
-
-Examples:
-  review_git_diff({})
-  review_git_diff({ base: "main" })
-  review_git_diff({ file: "src/index.ts" })
-  review_git_diff({ file: "src/index.ts", hunkId: "src/index.ts:10:12" })`,
-		promptSnippet:
-			"Open a read-only Git review markdown panel for local changes. Prefer /review-diff for the interactive TUI workflow.",
-		parameters: {
-			type: "object",
-			properties: {
-				base: {
-					type: "string",
-					description:
-						"Optional base branch/ref. Omit for uncommitted working-tree changes; set to main/master/etc. for base...HEAD branch review.",
-				},
-				file: {
-					type: "string",
-					description: "Optional changed file path to focus in the interactive review panel.",
-				},
-				hunkId: {
-					type: "string",
-					description: "Optional hunk id to focus, shown by review_git_diff output.",
-				},
-				includeRawDiff: {
-					type: "boolean",
-					description: "Return legacy raw review markdown instead of the interactive panel when true.",
-				},
-				raw: {
-					type: "boolean",
-					description: "Alias for includeRawDiff.",
-				},
-				maxLinesPerHunk: {
-					type: "number",
-					description: "Optional positive integer limit for lines shown per hunk.",
-				},
-				maxFiles: {
-					type: "number",
-					description: "Optional positive integer limit for files shown in the changed-file sidebar.",
-				},
-				maxHunks: {
-					type: "number",
-					description: "Optional positive integer limit for hunks shown in the focused file view.",
-				},
-			},
-			additionalProperties: false,
-		},
-
-		async execute(_tid: string, params: ReviewGitDiffParams = {}) {
-			try {
-				const safeParams = params ?? {};
-				const diff = await readGitDiff(cwd, reviewGitDiffMode(safeParams));
-				const maxLinesPerHunk = reviewGitDiffMaxLines(safeParams);
-				const markdown =
-					safeParams.includeRawDiff || safeParams.raw
-						? formatReviewMarkdown(diff, { includeRawDiff: true, maxLinesPerHunk })
-						: formatInteractiveReviewPanel(diff, reviewComments, {
-								file: safeParams.file,
-								hunkId: safeParams.hunkId,
-								maxFiles: normalizeOptionalPositiveInteger(safeParams.maxFiles, "maxFiles"),
-								maxHunks: normalizeOptionalPositiveInteger(safeParams.maxHunks, "maxHunks"),
-								maxLinesPerHunk,
-							});
-				const counts = countReviewDiffLines(diff);
-				return {
-					content: [{ type: "text" as const, text: markdown }],
-					details: {
-						_type: "reviewGitDiff",
-						markdown,
-						mode: diff.mode,
-						fileCount: diff.files.length,
-						insertions: counts.insertions,
-						deletions: counts.deletions,
-						commentCount: reviewComments.length,
-						focusedFile: safeParams.file,
-						focusedHunk: safeParams.hunkId,
-					},
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text" as const, text: `Error: ${message}` }],
-					details: { _type: "reviewGitDiff", error: message },
-				};
-			}
-		},
-
-		renderCall(args: ReviewGitDiffParams, theme: any, ctx: any) {
-			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
-			const base = typeof args?.base === "string" && args.base.trim() ? ` vs ${args.base.trim()}` : " working tree";
-			const focus = typeof args?.file === "string" && args.file.trim() ? ` • ${args.file.trim()}` : "";
-			text.setText(`${theme.fg("toolTitle", theme.bold("review_git_diff"))}${theme.fg("muted", `${base}${focus}`)}`);
-			return text;
-		},
-
-		renderResult(result: any, _opt: any, theme: any, ctx: any) {
-			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
-			if (ctx.isError || result.details?.error) {
-				text.setText(`\n${theme.fg("error", result.details?.error ?? "review_git_diff failed")}`);
-				return text;
-			}
-			const details = result.details;
-			if (details?._type === "reviewGitDiff") {
-				if (MarkdownComponent && getMarkdownTheme && typeof details.markdown === "string") {
-					return new MarkdownComponent(details.markdown, 0, 0, getMarkdownTheme());
-				}
-				const summary = `${details.fileCount} files ${summarize(details.insertions ?? 0, details.deletions ?? 0)}`;
-				const comments = details.commentCount ? ` • ${details.commentCount} comments` : "";
-				text.setText(
-					`  ${summary}${theme.fg("muted", comments)}\n${theme.fg("muted", "  Interactive review panel generated in the tool result.")}`,
-				);
-				return text;
-			}
-			text.setText(`  ${theme.fg("muted", "interactive review generated")}`);
-			return text;
-		},
-	});
-
-	pi.registerTool({
-		name: "review_git_comment",
-		label: "Draft Review Comment",
-		description:
-			"Draft an inline code-review comment for the current interactive Git review. This stores comments in memory for the current Pi session and does not modify files or submit anything externally.",
-		promptSnippet: "Draft an inline comment for the current Git review session.",
-		parameters: {
-			type: "object",
-			properties: {
-				file: { type: "string", description: "Changed file path to comment on." },
-				line: { type: "number", description: "Optional old/new line number to comment on." },
-				hunkId: { type: "string", description: "Optional hunk id from review_git_diff output." },
-				body: { type: "string", description: "Comment body." },
-			},
-			required: ["file", "body"],
-			additionalProperties: false,
-		},
-
-		async execute(_tid: string, params: ReviewGitCommentParams) {
-			const file = typeof params?.file === "string" ? params.file.trim() : "";
-			const body = typeof params?.body === "string" ? params.body.trim() : "";
-			if (!file)
-				return {
-					content: [{ type: "text" as const, text: "Error: file is required" }],
-					details: { error: "file required" },
-				};
-			if (!body)
-				return {
-					content: [{ type: "text" as const, text: "Error: body is required" }],
-					details: { error: "body required" },
-				};
-			const comment = createReviewComment({
-				comments: reviewComments,
-				file,
-				body,
-				line: normalizeOptionalPositiveInteger(params.line, "line"),
-				hunkId: typeof params.hunkId === "string" && params.hunkId.trim() ? params.hunkId.trim() : undefined,
-			});
-			reviewComments.push(comment);
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Drafted ${comment.id} on ${comment.file}${comment.line ? `:${comment.line}` : ""}\n\n${comment.body}`,
-					},
-				],
-				details: { _type: "reviewGitComment", comment, commentCount: reviewComments.length },
-			};
-		},
-
-		renderCall(args: ReviewGitCommentParams, theme: any, ctx: any) {
-			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
-			text.setText(
-				`${theme.fg("toolTitle", theme.bold("review_git_comment"))} ${theme.fg("accent", args?.file ?? "")}`,
-			);
-			return text;
-		},
-
-		renderResult(result: any, _opt: any, theme: any, ctx: any) {
-			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
-			if (ctx.isError || result.details?.error) {
-				text.setText(`\n${theme.fg("error", result.details?.error ?? "review_git_comment failed")}`);
-				return text;
-			}
-			const comment = result.details?.comment;
-			text.setText(
-				`  ${theme.fg("success", `✓ drafted ${comment?.id ?? "comment"}`)}${theme.fg("muted", ` (${result.details?.commentCount ?? 0} total)`)}`,
-			);
-			return text;
-		},
-	});
-
-	pi.registerTool({
-		name: "review_git_comments",
-		label: "Review Comments",
-		description: "List or clear drafted interactive Git review comments for the current Pi session.",
-		promptSnippet: "List or clear drafted review comments.",
-		parameters: {
-			type: "object",
-			properties: {
-				clear: { type: "boolean", description: "Clear all drafted comments when true." },
-			},
-			additionalProperties: false,
-		},
-
-		async execute(_tid: string, params: ReviewGitCommentsParams = {}) {
-			if (params?.clear) {
-				const cleared = reviewComments.length;
-				reviewComments.length = 0;
-				return {
-					content: [{ type: "text" as const, text: `Cleared ${cleared} drafted review comments.` }],
-					details: { _type: "reviewGitComments", cleared, commentCount: 0 },
-				};
-			}
-			const markdown = formatReviewComments(reviewComments);
-			return {
-				content: [{ type: "text" as const, text: markdown }],
-				details: { _type: "reviewGitComments", markdown, commentCount: reviewComments.length },
-			};
-		},
-
-		renderCall(_args: ReviewGitCommentsParams, theme: any, ctx: any) {
-			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
-			text.setText(theme.fg("toolTitle", theme.bold("review_git_comments")));
-			return text;
-		},
-
-		renderResult(result: any, _opt: any, theme: any, ctx: any) {
-			if (MarkdownComponent && getMarkdownTheme && typeof result.details?.markdown === "string") {
-				return new MarkdownComponent(result.details.markdown, 0, 0, getMarkdownTheme());
-			}
-			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
-			const cleared =
-				typeof result.details?.cleared === "number"
-					? `cleared ${result.details.cleared}`
-					: `${result.details?.commentCount ?? 0} drafted`;
-			text.setText(`  ${theme.fg("muted", cleared)} review comments`);
-			return text;
-		},
-	});
 
 	// =======================================================================
 	// write
@@ -1645,7 +1050,7 @@ Examples:
 			// Store in details — the only custom field TUI preserves in renderResult
 			if (old !== null && old !== content) {
 				const diff = parseDiff(old, content);
-				const lg = detectDiffLanguage(fp);
+				const lg = lang(fp);
 				(result as any).details = { _type: "diff", summary: summarize(diff.added, diff.removed), diff, language: lg };
 			} else if (old === null) {
 				const lineCount = content ? content.split("\n").length : 0;
@@ -1672,11 +1077,11 @@ Examples:
 
 			// New file preview with Shiki
 			if (args?.content && ctx.argsComplete && isNew) {
-				const previewKey = `create:${sharedThemeCacheKey(theme)}:${fp}:${String(args.content).length}`;
+				const previewKey = `create:${themeCacheKey(theme)}:${fp}:${String(args.content).length}`;
 				if (ctx.state._previewKey !== previewKey) {
 					ctx.state._previewKey = previewKey;
 					ctx.state._previewText = hdr;
-					const lg = detectDiffLanguage(fp);
+					const lg = lang(fp);
 					hlBlock(args.content, lg)
 						.then((lines: string[]) => {
 							if (ctx.state._previewKey !== previewKey) return;
@@ -1712,12 +1117,12 @@ Examples:
 			const d = result.details;
 			if (d?._type === "diff") {
 				const w = termW();
-				const key = `wd:${sharedThemeCacheKey(theme)}:${w}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}`;
+				const key = `wd:${themeCacheKey(theme)}:${w}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}`;
 				if (ctx.state._wdk !== key) {
 					ctx.state._wdk = key;
 					ctx.state._wdt = `  ${d.summary}\n${theme.fg("muted", "  rendering diff…")}`;
-					const dc = resolveSharedDiffColors(theme);
-					renderSharedSplit(d.diff, d.language, MAX_RENDER_LINES, dc, w)
+					const dc = resolveDiffColors(theme);
+					renderSplit(d.diff, d.language, MAX_RENDER_LINES, dc)
 						.then((rendered: string) => {
 							if (ctx.state._wdk !== key) return;
 							ctx.state._wdt = `  ${d.summary}\n${rendered}`;
@@ -1738,11 +1143,11 @@ Examples:
 			}
 			if (d?._type === "new") {
 				const { lines: lineCount, content: rawContent, filePath: fp } = d;
-				const pk = `nf:${sharedThemeCacheKey(theme)}:${fp}:${lineCount}`;
+				const pk = `nf:${themeCacheKey(theme)}:${fp}:${lineCount}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
 					ctx.state._nft = `  ${theme.fg("success", `✓ new file (${lineCount} lines)`)}`;
-					const lg = detectDiffLanguage(fp);
+					const lg = lang(fp);
 					if (rawContent) {
 						hlBlock(rawContent, lg)
 							.then((hlLines: string[]) => {
@@ -1850,16 +1255,16 @@ Examples:
 				return text;
 			}
 
-			const pk = JSON.stringify({ fp, operations, theme: sharedThemeCacheKey(theme), w: termW() });
+			const pk = JSON.stringify({ fp, operations, theme: themeCacheKey(theme), w: termW() });
 			if (ctx.state._pk !== pk) {
 				ctx.state._pk = pk;
 				ctx.state._pt = `${hdr}  ${theme.fg("muted", "(rendering…)")}`;
-				const lg = detectDiffLanguage(fp);
-				const dc = resolveSharedDiffColors(theme);
+				const lg = lang(fp);
+				const dc = resolveDiffColors(theme);
 
 				if (operations.length === 1) {
 					const diff = parseDiff(operations[0].oldText, operations[0].newText);
-					renderSharedSplit(diff, lg, MAX_PREVIEW_LINES, dc, termW())
+					renderSplit(diff, lg, MAX_PREVIEW_LINES, dc)
 						.then((rendered) => {
 							if (ctx.state._pk !== pk) return;
 							ctx.state._pt = `${hdr}\n${summarize(diff.added, diff.removed)}\n${rendered}`;
@@ -1876,7 +1281,7 @@ Examples:
 					const previewLines = Math.max(8, Math.floor(MAX_PREVIEW_LINES / maxShown));
 					Promise.all(
 						diffs.slice(0, maxShown).map((diff, index) =>
-							renderSharedSplit(diff, lg, previewLines, dc, termW())
+							renderSplit(diff, lg, previewLines, dc)
 								.then((rendered) => `Edit ${index + 1}/${operations.length}\n${rendered}`)
 								.catch(() => `Edit ${index + 1}/${operations.length}  ${summarize(diff.added, diff.removed)}`),
 						),
